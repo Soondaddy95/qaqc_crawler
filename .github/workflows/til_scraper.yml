@@ -1,0 +1,48 @@
+name: Daily TIL Crawler
+
+# 언제 실행할까요?
+on:
+  schedule:
+    # 한국 시간 00:00 실행 (UTC 15:00)
+    # 분(0) 시(15) * * *
+    - cron: '0 15 * * *'
+  
+  # 깃허브 웹사이트에서 버튼 눌러서 수동 실행 가능하게 하는 옵션
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest  # 리눅스 최신 컴퓨터 빌려줘
+
+    steps:
+      # 1. 형님 코드 내려받기
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 2. 파이썬 3.9 설치하기
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      # 3. 크롬 브라우저 설치하기 (최신 버전)
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@latest
+        with:
+          chrome-version: stable
+
+      # 4. 준비물(라이브러리) 설치하기
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # 5. [중요] 비밀 금고(Secret)에서 인증키 꺼내서 파일로 만들기
+      # 이 파일이 있어야 구글 시트에 접근 가능함
+      - name: Create JSON key file
+        run: |
+          echo '${{ secrets.GOOGLE_JSON_KEY }}' > qaqc-pipeline.json
+
+      # 6. 크롤러 실행 (드디어!)
+      - name: Run Crawler Script
+        run: |
+          python daily_til_bot.py

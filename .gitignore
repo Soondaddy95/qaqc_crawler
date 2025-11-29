@@ -1,0 +1,6 @@
+# .gitignore
+.env
+qaqc-pipeline.json
+daily_log.txt
+apm_profile/
+__pycache__/
