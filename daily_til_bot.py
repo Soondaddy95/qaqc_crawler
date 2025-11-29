@@ -89,19 +89,40 @@ class DateCalculator:
                 continue
             return cursor_str
 
+# [수정본] ChromeManager (서버인 척 안 하고 맥북인 척 위장하기)
+
 class ChromeManager:
     @staticmethod
     def launch_chrome(config: Config):
         options = webdriver.ChromeOptions()
-        # 서버용 헤드리스 설정
+        
+        # 1. 헤드리스 모드 (서버니까 필수)
         options.add_argument("--headless=new") 
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
         
-        print("🕵️‍♂️ 크롬 드라이버(Headless) 초기화 중...")
+        # 👇 [핵심] 가면 쓰기 (User-Agent 변조)
+        # "나는 리눅스 서버가 아니라, 최신 맥북 크롬이다!" 라고 속임
+        user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        options.add_argument(f"user-agent={user_agent}")
+        
+        # 봇 탐지 방지 옵션 추가
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        print("🕵️‍♂️ 크롬 드라이버(Headless + 위장 모드) 초기화 중...")
+        
         try:
-            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()), 
+                options=options
+            )
+            
+            # [중요] navigator.webdriver 속성을 숨겨서 완벽하게 사람인 척 함
+            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
             return driver
         except Exception as e:
             print(f"❌ 크롬 실행 실패: {e}")
