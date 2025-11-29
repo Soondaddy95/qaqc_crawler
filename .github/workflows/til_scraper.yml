@@ -40,5 +40,6 @@ jobs:
         env:
           BACKOFFICE_URL: ${{ secrets.BACKOFFICE_URL }}
           TIL_SHEET_URL: ${{ secrets.TIL_SHEET_URL }}
+          BACKOFFICE_COOKIES: ${{ secrets.BACKOFFICE_COOKIES }}
         run: |
           python daily_til_bot.py
