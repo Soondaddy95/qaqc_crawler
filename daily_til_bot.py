@@ -132,6 +132,10 @@ class ChromeManager:
 # Crawler (Updated with Cookie Logic)
 # ============================================================
 
+# ============================================================
+# 3. 크롤러 (Crawler Logic) - 옵션 선택 기능 복구
+# ============================================================
+
 class BackOfficeCrawler:
     def __init__(self, driver, config: Config):
         self.driver = driver
@@ -139,102 +143,151 @@ class BackOfficeCrawler:
         self.wait = WebDriverWait(driver, config.WAIT_TIMEOUT)
     
     def force_click(self, element):
+        """JS 강제 클릭"""
         try: element.click()
         except: self.driver.execute_script("arguments[0].click();", element)
 
+    def handle_alert(self):
+        """혹시 모를 경고창 처리"""
+        try:
+            alert = self.driver.switch_to.alert
+            print(f"⚠️ 경고창 발견: {alert.text}")
+            alert.accept()
+            time.sleep(1)
+        except:
+            pass
+
+    def select_options(self):
+        """카테고리, 코스, 기수 선택 로직 (서버 환경 필수)"""
+        print("👉 옵션 선택 중...")
+        
+        try:
+            # 1. 카테고리 선택 (QA/QC)
+            category_xpath = f"//*[contains(text(), '{self.config.CATEGORY}')]"
+            category_elem = self.wait.until(EC.element_to_be_clickable((By.XPATH, category_xpath)))
+            self.force_click(category_elem)
+            time.sleep(self.config.MENU_CLICK_WAIT)
+            
+            # 2. 코스 선택 (드롭다운 열고 -> 키워드 찾기)
+            # 드롭다운들이 .ant-select-selector 클래스를 가짐
+            dropdowns = self.driver.find_elements(By.CSS_SELECTOR, ".ant-select-selector")
+            if dropdowns:
+                self.force_click(dropdowns[0]) # 첫 번째가 보통 코스 선택
+                time.sleep(1)
+                
+                # 코스 키워드로 옵션 찾기
+                course_conditions = " and ".join([f"contains(., '{k}')" for k in self.config.COURSE_KEYWORDS])
+                course_xpath = f"//div[contains(@class, 'ant-select-item-option') and {course_conditions}]"
+                course_opt = self.wait.until(EC.element_to_be_clickable((By.XPATH, course_xpath)))
+                self.force_click(course_opt)
+                time.sleep(self.config.MENU_CLICK_WAIT)
+            
+            # 3. 기수(회차) 선택
+            # 코스를 선택하면 DOM이 바뀌므로 다시 찾음
+            dropdowns = self.driver.find_elements(By.CSS_SELECTOR, ".ant-select-selector")
+            if len(dropdowns) >= 2:
+                self.force_click(dropdowns[1]) # 두 번째가 기수 선택
+                time.sleep(1)
+                
+                batch_xpath = f"//div[contains(@class, 'ant-select-item-option') and contains(., '{self.config.BATCH_NAME}')]"
+                batch_opts = self.driver.find_elements(By.XPATH, batch_xpath)
+                for opt in batch_opts:
+                    if opt.is_displayed():
+                        self.force_click(opt)
+                        break
+                time.sleep(self.config.MENU_CLICK_WAIT)
+                
+            print("✅ 옵션 선택 완료")
+            
+        except Exception as e:
+            print(f"⚠️ 옵션 선택 중 문제 발생 (이미 선택되어 있을 수 있음): {e}")
+            # 에러 나도 일단 진행 (혹시 기본값이 맞을 수도 있으니)
+
     def navigate_and_search(self):
+        """백오피스 진입 -> 쿠키 -> 메뉴 -> 옵션 -> 조회"""
         print("\n🔗 백오피스 진입 중...")
-        
-        # 1. 사이트 접속 (로그인 안 된 상태)
-        self.driver.get(self.config.BACKOFFICE_URL)
-        
-        # 2. [핵심] 쿠키 주입 (로그인 우회)
+        if not self.config.BACKOFFICE_URL:
+             raise ValueError("❌ 환경변수 'BACKOFFICE_URL' 없음")
+
+        if "h99backoffice" not in self.driver.current_url:
+            self.driver.get(self.config.BACKOFFICE_URL)
+            
+        # --- 쿠키 로직 ---
         cookies_json = os.environ.get("BACKOFFICE_COOKIES")
-        
         if cookies_json:
-            print("🍪 [서버 모드] 저장된 쿠키를 주입하여 로그인을 시도합니다.")
+            print("🍪 쿠키 주입 시도...")
             try:
                 cookies = json.loads(cookies_json)
                 for cookie in cookies:
-                    # Selenium 호환성을 위해 불필요한 키 삭제
-                    if 'expiry' in cookie:
-                        del cookie['expiry']
-                    if 'sameSite' in cookie:
-                        del cookie['sameSite'] # 가끔 충돌남
-                        
-                    try:
-                        self.driver.add_cookie(cookie)
-                    except Exception as e:
-                        # 도메인 불일치 등 사소한 쿠키 에러는 무시
-                        pass
-                
-                print("🔄 쿠키 주입 완료. 페이지를 새로고침합니다.")
+                    if 'expiry' in cookie: del cookie['expiry']
+                    if 'sameSite' in cookie: del cookie['sameSite']
+                    try: self.driver.add_cookie(cookie)
+                    except: pass
                 self.driver.refresh()
-                time.sleep(3) # 새로고침 후 로그인 적용 대기
-                
-            except Exception as e:
-                print(f"⚠️ 쿠키 적용 중 오류 (무시하고 진행): {e}")
-        else:
-            print("ℹ️ [로컬 모드] 기존 브라우저 세션을 사용합니다.")
-
-        # 3. 메뉴 이동 (기존 로직)
-        print("👉 메뉴 이동 시도...")
+                time.sleep(3)
+                self.handle_alert() # 리프레시 직후 알림창 뜰 경우 대비
+            except Exception as e: print(f"⚠️ 쿠키 에러: {e}")
+        
+        # --- 메뉴 이동 ---
         try:
             time.sleep(2)
             menu_xpath = "//span[contains(text(), 'TIL 제출 현황 관리')]"
             menu = self.driver.find_elements(By.XPATH, menu_xpath)
-            
             if not menu or not menu[0].is_displayed():
                 op_menu = self.driver.find_element(By.XPATH, "//*[contains(text(), '내배캠 운영')]")
                 self.force_click(op_menu)
                 time.sleep(1)
-            
             real_menu = self.wait.until(EC.element_to_be_clickable((By.XPATH, menu_xpath)))
             self.force_click(real_menu)
-            print("✅ 메뉴 진입 성공")
-        except Exception as e:
-            print(f"⚠️ 메뉴 이동 실패 (로그인 실패 가능성): {e}")
-            # 스크린샷 찍어서 디버깅 가능하게 (선택)
-            # self.driver.save_screenshot("login_failed.png")
+            time.sleep(2)
+        except: pass
         
-        time.sleep(2)
+        # --- 👇 [추가] 옵션 선택 실행! ---
+        self.select_options()
         
+        # --- 조회 버튼 클릭 ---
         try:
             search_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., '조회하기')]")))
             self.force_click(search_btn)
             time.sleep(3)
+            self.handle_alert() # 조회 후 경고창 뜨면 닫기
         except: pass
 
     def collect_data(self, target_date: str) -> list:
+        """상세 모달 진입 방식 데이터 수집"""
         print(f"\n🐢 데이터 수집 시작 (타겟 날짜: {target_date})")
+        print("ℹ️ 한 명씩 상세 내역을 확인합니다...")
+        
         total_data = []
         current_page = 1
         MAX_PAGES = 50
         
         while current_page <= MAX_PAGES:
-            print(f"\n📄 [Page {current_page}] 스캔 중...", end="")
+            print(f"\n📄 [Page {current_page}] 목록 스캔 중...")
             time.sleep(self.config.DATA_COLLECTION_WAIT)
             
             rows = self.driver.find_elements(By.CSS_SELECTOR, "tr.ant-table-row")
             if not rows:
-                print("\n   ⚠️ 데이터가 없습니다. (로그인이 풀렸거나 데이터 끝)")
+                print("   ⚠️ 데이터가 없습니다. (옵션 선택 실패 또는 데이터 끝)")
                 break
             
             row_count = len(rows)
-            print(f" -> {row_count}명 발견")
-            
             for i in range(row_count):
                 try:
+                    # DOM 리프레시 대응 (매번 새로 찾기)
                     current_row = self.driver.find_elements(By.CSS_SELECTOR, "tr.ant-table-row")[i]
                     name = current_row.find_elements(By.TAG_NAME, "td")[0].text.strip()
                     print(f"   🔍 ({i+1}/{row_count}) {name}님 확인 중...", end="\r")
                     
+                    # [제출 내역 보기] 버튼 클릭
                     btn = current_row.find_element(By.XPATH, ".//button[contains(., '제출 내역 보기') or span[contains(., '제출 내역 보기')]]")
                     self.force_click(btn)
                     
+                    # 모달 대기
                     modal = self.wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".ant-modal-content")))
                     time.sleep(self.config.MODAL_WAIT)
                     
+                    # --- [미제출 판별 핵심 로직] ---
                     status = 0
                     found_date = False
                     
@@ -242,26 +295,41 @@ class BackOfficeCrawler:
                     for m_row in modal_rows:
                         cols = m_row.find_elements(By.TAG_NAME, "td")
                         if not cols: continue
+                        
+                        # 날짜 매칭
                         if cols[0].text.strip() == target_date:
                             status_txt = cols[1].text.strip()
-                            if "미제출" in status_txt: status = 0
-                            elif "제출" in status_txt or "완료" in status_txt: status = 1
-                            else: status = 0
+                            
+                            # 텍스트 분석
+                            if "미제출" in status_txt:
+                                status = 0
+                            elif "제출" in status_txt or "완료" in status_txt:
+                                status = 1
+                            else:
+                                status = 0 # 모호하면 0
+                                
                             found_date = True
                             break
                     
+                    if not found_date:
+                        status = 0 # 해당 날짜 행이 없으면 미제출
+                    
+                    # 모달 닫기
                     close = modal.find_element(By.XPATH, ".//button[contains(., 'OK')]")
                     self.force_click(close)
                     self.wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, ".ant-modal-content")))
                     time.sleep(0.3)
                     
                     total_data.append({"이름": name, "날짜": target_date, "제출여부": status})
+                    
                 except Exception as e:
-                    print(f"\n   ❌ 에러: {e}")
+                    print(f"\n   ❌ {name} 처리 중 에러: {e}")
+                    # 에러 복구 (ESC)
                     try: webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform(); time.sleep(1)
                     except: pass
                     continue
             
+            # 페이지 넘김
             try:
                 next_btns = self.driver.find_elements(By.CSS_SELECTOR, "li.ant-pagination-next")
                 if next_btns and "ant-pagination-disabled" not in next_btns[0].get_attribute("class"):
@@ -272,82 +340,3 @@ class BackOfficeCrawler:
             except: break
             
         return total_data
-
-def extract_til_data(manual_date: str = None) -> pd.DataFrame:
-    config = Config()
-    if manual_date:
-        print(f"🛠️ [수동 모드] '{manual_date}' 수집")
-        target_date = manual_date
-    else:
-        print("🤖 [자동 모드] 날짜 계산 중...")
-        target_date = DateCalculator.get_target_date(config)
-        
-    driver = ChromeManager.launch_chrome(config)
-    try:
-        crawler = BackOfficeCrawler(driver, config)
-        crawler.navigate_and_search()
-        data = crawler.collect_data(target_date)
-        df = pd.DataFrame(data)
-        print(f"\n✅ 수집 완료! 총 {len(df)}건.")
-        return df
-    except Exception as e:
-        print(f"❌ 에러: {e}")
-        return pd.DataFrame()
-
-# ============================================================
-# Uploader
-# ============================================================
-
-JSON_FILE = "qaqc-pipeline.json" 
-TIL_SHEET_URL = os.environ.get("TIL_SHEET_URL")
-
-class GoogleSheetManager:
-    def __init__(self):
-        if not TIL_SHEET_URL:
-            raise ValueError("❌ 'TIL_SHEET_URL' 없음")
-        self.scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        try:
-            self.creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, self.scope)
-            self.client = gspread.authorize(self.creds)
-            self.sheet = self.client.open_by_url(TIL_SHEET_URL).sheet1
-            print("✅ 구글 시트 연결 성공")
-        except Exception as e:
-            print(f"❌ 구글 시트 연결 실패: {e}")
-            raise e
-
-    def save_data(self, new_df: pd.DataFrame):
-        if new_df.empty:
-            print("⚠️ 데이터 없음")
-            return
-        target_date = new_df.iloc[0]['날짜']
-        print(f"\n💾 저장 시작 ({target_date})...")
-        try:
-            existing_data = self.sheet.get_all_records()
-            existing_df = pd.DataFrame(existing_data)
-        except: existing_df = pd.DataFrame()
-
-        if not existing_df.empty and '날짜' in existing_df.columns:
-            existing_df['날짜'] = existing_df['날짜'].astype(str)
-            existing_df = existing_df[existing_df['날짜'] != str(target_date)]
-
-        final_df = pd.concat([new_df, existing_df], ignore_index=True)
-        if '날짜' in final_df.columns:
-            final_df = final_df.sort_values(by='날짜', ascending=False)
-        final_df = final_df.fillna("") 
-
-        self.sheet.clear()
-        data_to_write = [final_df.columns.values.tolist()] + final_df.values.tolist()
-        self.sheet.update(data_to_write)
-        print(f"✅ 저장 완료!")
-
-def upload_til_data(df: pd.DataFrame):
-    try:
-        if df is None or df.empty: return
-        manager = GoogleSheetManager()
-        manager.save_data(df)
-    except Exception as e: print(f"❌ 업로드 오류: {e}")
-
-if __name__ == "__main__":
-    df_result = extract_til_data(manual_date=TARGET_DATE_OVERRIDE)
-    if not df_result.empty:
-        upload_til_data(df_result)
