@@ -1,5 +1,5 @@
 # ============================================================
-# [Attendance Bot] 출석/지각/조퇴 자동 집계 (Debug Ver.)
+# [Attendance Bot] 출석 자동 집계 (Direct URL Ver.)
 # ============================================================
 
 # 👇 [수집 날짜 설정] None = 자동(오늘/어제), "2025-12-01" = 특정 날짜
@@ -9,8 +9,6 @@ import time
 import os
 import sys
 import json
-import socket
-import subprocess
 import pandas as pd
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -36,6 +34,9 @@ class Config:
     IS_SERVER = os.environ.get("GITHUB_ACTIONS") == "true"
     BACKOFFICE_URL = os.environ.get("BACKOFFICE_URL", "https://h99backoffice.spartaclub.kr/")
     
+    # 👇 [핵심] 메뉴 클릭 없이 바로 가는 주소
+    ATTENDANCE_URL = "https://h99backoffice.spartaclub.kr/nbcamp/users/dashboard"
+    
     COURSE_NAME = "QA 4기"
     COURSE_KEYWORDS = ["KDT", "QA", "4"]
     BATCH_NAME = "4회차"
@@ -52,7 +53,7 @@ class Config:
     else:
         CHROME_APP_PATH = "/usr/bin/google-chrome"
 
-    WAIT_TIMEOUT = 30 # 대기 시간 늘림
+    WAIT_TIMEOUT = 30
     CHROME_LAUNCH_WAIT = 4
     DATA_COLLECTION_WAIT = 1.0
     MODAL_WAIT = 1.5
@@ -69,12 +70,12 @@ class Config:
     }
 
 # ============================================================
-# 2. DateCalculator (KST 적용)
+# 2. DateCalculator
 # ============================================================
 class DateCalculator:
     @staticmethod
     def get_target_date(config: Config) -> str:
-        # 깃허브 서버(UTC)에서도 한국 시간(KST) 기준으로 날짜 계산
+        # KST 시간 보정
         kst_now = datetime.utcnow() + timedelta(hours=9)
         today = kst_now.date()
         today_str = today.strftime("%Y-%m-%d")
@@ -110,7 +111,6 @@ class ChromeManager:
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--window-size=1920,1080")
-            # 맥북 크롬인 척 위장 (가장 최신 버전)
             user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             options.add_argument(f"user-agent={user_agent}")
             
@@ -145,7 +145,7 @@ class ChromeManager:
                 sys.exit(1)
 
 # ============================================================
-# 4. Attendance Crawler
+# 4. Attendance Crawler (직통 URL 적용)
 # ============================================================
 class AttendanceCrawler:
     def __init__(self, driver, config: Config):
@@ -157,10 +157,13 @@ class AttendanceCrawler:
         self.driver.execute_script("arguments[0].click();", element)
 
     def navigate_to_attendance(self):
-        print("\n🔗 백오피스 진입 중...")
+        """쿠키 주입 후 직통 URL로 이동 (메뉴 클릭 삭제)"""
+        print("\n🔗 백오피스 진입 (쿠키 작업 시작)...")
+        
+        # 1. 도메인 설정을 위해 메인 페이지 먼저 접속 (빈 페이지라도 가야 함)
         self.driver.get(self.config.BACKOFFICE_URL)
         
-        # [서버] 쿠키 주입 로직
+        # [서버] 쿠키 주입
         if self.config.IS_SERVER:
             cookies_json = os.environ.get("BACKOFFICE_COOKIES")
             if cookies_json:
@@ -174,54 +177,34 @@ class AttendanceCrawler:
                         try: self.driver.add_cookie(cookie)
                         except: pass
                     
-                    print("🔄 쿠키 적용 후 새로고침... (10초 대기)")
-                    self.driver.refresh()
-                    time.sleep(10) # 서버 반영 대기 시간 대폭 증가
-                    
-                    # [중요] 현재 URL 체크 (로그인 튕김 확인)
-                    current_url = self.driver.current_url
-                    print(f"👀 [체크] 현재 페이지: {current_url}")
-                    
-                    if "login" in current_url or "google.com" in current_url:
-                        print("🚨 [로그인 실패] 쿠키가 거부당했습니다. 로그인 페이지로 리다이렉트됨.")
-                        # 실패해도 일단 진행해보고, 아래에서 에러 잡히게 함
-                    else:
-                        print("✅ 로그인 유지 성공 (관리자 페이지 진입)")
-
+                    print("✅ 쿠키 주입 완료.")
                 except Exception as e: print(f"⚠️ 쿠키 에러: {e}")
+        
+        # 2. [핵심] 직통 URL로 점프!
+        print(f"🚀 대시보드로 순간이동: {self.config.ATTENDANCE_URL}")
+        self.driver.get(self.config.ATTENDANCE_URL)
+        
+        # 3. 로컬/서버 모두 로딩 대기
+        time.sleep(5) 
+
+        # 4. 로그인 성공 여부 확인
+        current_url = self.driver.current_url
+        print(f"👀 현재 페이지: {current_url}")
+        
+        if "login" in current_url or "google.com" in current_url:
+            print("🚨 [치명적 오류] 로그인 페이지로 튕겼습니다. (쿠키 만료 또는 세션 없음)")
+            if self.config.IS_SERVER:
+                raise Exception("LOGIN_FAILED")
+            else:
+                print("👉 [로컬] 직접 로그인 후 터미널에서 엔터를 치세요.")
+                input()
         else:
-            time.sleep(3)
-
-        print("👉 메뉴 이동 시작...")
-        try:
-            # 1. '내배캠 운영' 펼치기
-            try:
-                parent_menu = self.driver.find_element(By.XPATH, "//*[contains(text(), '내배캠 운영')]")
-                if parent_menu.is_displayed():
-                    self.force_click(parent_menu)
-                    time.sleep(1)
-            except: pass
-
-            # 2. '출결 관리' 클릭
-            att_menu = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), '출결 관리')]")))
-            self.force_click(att_menu)
-            time.sleep(1)
-            
-            # 3. '본캠프 출결 대시보드' 클릭
-            dashboard_menu = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), '본캠프 출결 대시보드')]")))
-            self.force_click(dashboard_menu)
-            
-            time.sleep(5) # 페이지 로딩 대기
-            print("✅ 출결 대시보드 진입 성공")
-
-        except Exception as e:
-            print(f"❌ 메뉴 이동 실패: {e}")
-            # 현재 화면 소스 일부 출력 (디버깅용)
-            # print(self.driver.page_source[:500])
+            print("✅ 로그인 유지 성공!")
 
     def select_options(self):
         print("👉 [출석부] 옵션 선택 시작...")
         try:
+            # 1. [카테고리] QA/QC
             try:
                 cat_xpath = "//span[contains(text(), 'QA/QC')]"
                 cat_elem = self.wait.until(EC.element_to_be_clickable((By.XPATH, cat_xpath)))
@@ -230,26 +213,30 @@ class AttendanceCrawler:
                 time.sleep(1)
             except: pass
 
-            print("   ⏳ 기수(KDT) 드롭다운 여는 중...")
+            # 2. [기수 선택] ActionChains
+            print("   ⏳ 기수(KDT) 선택 중...")
             try:
                 course_box = self.wait.until(EC.visibility_of_element_located((
-                    By.XPATH, "//div[contains(@class, 'ant-select-selector') and .//span[contains(@title, 'KDT')]]"
+                    By.XPATH, 
+                    "//div[contains(@class, 'ant-select-selector') and .//span[contains(@title, 'KDT')]]"
                 )))
                 actions = ActionChains(self.driver)
                 actions.move_to_element(course_box).click().perform()
-                print("   🖱️ [ActionChains] 기수 드롭다운 클릭")
                 time.sleep(1)
 
                 target_course = "4회차"
                 course_opt = self.wait.until(EC.element_to_be_clickable((
-                    By.XPATH, f"//div[contains(@class, 'ant-select-item-option') and contains(., '{target_course}')]"
+                    By.XPATH, 
+                    f"//div[contains(@class, 'ant-select-item-option') and contains(., '{target_course}')]"
                 )))
                 self.force_click(course_opt)
                 print(f"   ✅ 기수 '{target_course}' 선택 완료")
-            except Exception as e: print(f"   ⚠️ 기수 선택 패스: {e}")
+            except Exception as e:
+                print(f"   ⚠️ 기수 선택 패스: {e}")
             
             time.sleep(2)
 
+            # 3. [마케팅 기수 선택]
             print("   ⏳ 마케팅 기수 선택 중...")
             dropdowns = self.driver.find_elements(By.CSS_SELECTOR, ".ant-select-selector")
             if len(dropdowns) >= 2:
@@ -257,30 +244,36 @@ class AttendanceCrawler:
                 try:
                     actions = ActionChains(self.driver)
                     actions.move_to_element(marketing_box).click().perform()
-                    print("   🖱️ [ActionChains] 마케팅 드롭다운 클릭")
-                except: self.force_click(marketing_box)
+                except:
+                    self.force_click(marketing_box)
                 time.sleep(1)
                 
                 marketing_target = "품질관리(QAQC)" 
                 try:
                     marketing_opt = self.wait.until(EC.element_to_be_clickable((
-                        By.XPATH, f"//div[contains(@class, 'ant-select-item-option') and contains(., '{marketing_target}')]"
+                        By.XPATH, 
+                        f"//div[contains(@class, 'ant-select-item-option') and contains(., '{marketing_target}')]"
                     )))
                     self.force_click(marketing_opt)
                     print(f"   ✅ 마케팅 기수 '{marketing_target}' 선택 완료")
                 except: pass
-            else: print("   ⚠️ 두 번째 드롭다운 못 찾음")
+            else:
+                print("   ⚠️ 두 번째 드롭다운 못 찾음")
 
             time.sleep(1)
+
+            # 4. [조회] 버튼
             print("   🔍 조회 버튼 클릭...")
             try:
                 search_btn = self.driver.find_element(By.XPATH, "//button[contains(., '조회')]")
                 self.force_click(search_btn)
                 print("   ✅ 조회 버튼 클릭 완료")
             except: pass
-            time.sleep(5) # 데이터 로딩 대기
+            
+            time.sleep(5)
 
-        except Exception as e: print(f"❌ 옵션 선택 중 오류: {e}")
+        except Exception as e:
+            print(f"❌ 옵션 선택 중 오류: {e}")
 
     def collect_data(self, target_date) -> list:
         print(f"\n🐢 출석 데이터 수집 시작 (타겟: {target_date})")
@@ -302,9 +295,9 @@ class AttendanceCrawler:
                 text_list = row.text.split('\n')
                 if len(text_list) < 5: continue
 
-                name = text_list[0].strip()
-                in_time = text_list[3].strip()
-                out_time = text_list[4].strip()
+                name = text_list[0].strip()     # 0번: 이름
+                in_time = text_list[3].strip()  # 3번: 입실
+                out_time = text_list[4].strip() # 4번: 퇴실
 
                 if in_time == "-": in_time = ""
                 if out_time == "-": out_time = ""
