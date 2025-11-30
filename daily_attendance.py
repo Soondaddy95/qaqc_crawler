@@ -177,10 +177,44 @@ class AttendanceCrawler:
     def navigate_to_attendance(self):
         print("\n🔗 백오피스 진입 중...")
         self.driver.get(self.config.BACKOFFICE_URL)
-        if not self.config.IS_SERVER: time.sleep(2)
+        
+        # ---------------------------------------------------------
+        # 🍪 [추가된 부분] 쿠키 주입 로직 (서버 환경 필수)
+        # ---------------------------------------------------------
+        if self.config.IS_SERVER:
+            cookies_json = os.environ.get("BACKOFFICE_COOKIES")
+            if cookies_json:
+                print("🍪 [서버] 쿠키 주입 시도...")
+                try:
+                    cookies = json.loads(cookies_json)
+                    for cookie in cookies:
+                        if 'expiry' in cookie: del cookie['expiry']
+                        if 'sameSite' in cookie: del cookie['sameSite']
+                        if 'domain' in cookie: del cookie['domain'] # 핵심!
+                        try: self.driver.add_cookie(cookie)
+                        except: pass
+                    
+                    print("🔄 쿠키 적용 후 새로고침...")
+                    self.driver.refresh()
+                    time.sleep(5) # 로그인 적용 대기
+                    
+                    # 경고창 있으면 닫기
+                    try:
+                        alert = self.driver.switch_to.alert
+                        alert.accept()
+                    except: pass
+                    
+                except Exception as e: print(f"⚠️ 쿠키 에러: {e}")
+        else:
+            # 로컬
+            time.sleep(3)
 
+        # ---------------------------------------------------------
+        # 메뉴 이동 로직 (기존과 동일)
+        # ---------------------------------------------------------
         print("👉 메뉴 이동 시작...")
         try:
+            # 1. '내배캠 운영' 펼치기
             try:
                 parent_menu = self.driver.find_element(By.XPATH, "//*[contains(text(), '내배캠 운영')]")
                 if parent_menu.is_displayed():
@@ -188,15 +222,23 @@ class AttendanceCrawler:
                     time.sleep(1)
             except: pass
 
+            # 2. '출결 관리' 클릭
             att_menu = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), '출결 관리')]")))
             self.force_click(att_menu)
             time.sleep(1)
             
+            # 3. '본캠프 출결 대시보드' 클릭
             dashboard_menu = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), '본캠프 출결 대시보드')]")))
             self.force_click(dashboard_menu)
-            time.sleep(3)
+            
+            time.sleep(3) # 페이지 로딩 대기
             print("✅ 출결 대시보드 진입 성공")
-        except Exception as e: print(f"❌ 메뉴 이동 실패: {e}")
+
+        except Exception as e:
+            print(f"❌ 메뉴 이동 실패: {e}")
+            # 로그인 실패 시 여기서 멈추도록 에러 던지기
+            if "로그인이 필요합니다" in str(e):
+                raise Exception("LOGIN_FAILED: 쿠키 만료됨.")
 
     def select_options(self):
         print("👉 [출석부] 옵션 선택 시작...")
