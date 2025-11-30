@@ -4,4 +4,4 @@ qaqc-pipeline.json
 daily_log.txt
 apm_profile/
 __pycache__/
-get_cookies.py
+get_cookies.pyvenv/

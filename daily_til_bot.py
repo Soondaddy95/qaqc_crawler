@@ -1,9 +1,8 @@
 # ============================================================
-# [FINAL COMPLETE] GitHub Actions & Local Hybrid TIL 자동화 봇
+# [FINAL COMPLETE v5] 안전벨트(로그인 대기) 탑재 버전
 # ============================================================
 
 # 👇 [수집 날짜 설정]
-# None = 자동(가장 최근 영업일), "2025-11-27" = 특정 날짜 강제 지정
 TARGET_DATE_OVERRIDE = None 
 
 import subprocess
@@ -33,20 +32,17 @@ from selenium.common.exceptions import (
 )
 from selenium.webdriver.common.keys import Keys
 
-# .env 파일 로드 (로컬 실행용)
 load_dotenv() 
 
 # ============================================================
-# Config 설정 클래스
+# Config
 # ============================================================
 
 class Config:
-    """크롤링 설정 및 환경 구성"""
-    
-    # 🔒 [보안] URL은 환경변수에서 가져옴
+    IS_SERVER = os.environ.get("GITHUB_ACTIONS") == "true"
     BACKOFFICE_URL = os.environ.get("BACKOFFICE_URL")
     if not BACKOFFICE_URL:
-        raise ValueError("❌ [설정 오류] 'BACKOFFICE_URL' 환경변수가 없습니다.")
+        BACKOFFICE_URL = "https://h99backoffice.spartaclub.kr/"
 
     COURSE_NAME = "QA 4기"
     COURSE_KEYWORDS = ["KDT", "QA", "4"]
@@ -54,15 +50,12 @@ class Config:
     CATEGORY = "QA/QC"
 
     CHROME_DEBUG_PORT = 9222
-    
-    if sys.platform == "darwin":  # Mac Studio
+    if sys.platform == "darwin":
         CHROME_APP_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    else:  # Linux (GitHub Actions)
+    else:
         CHROME_APP_PATH = "/usr/bin/google-chrome"
         
-    USER_DATA_DIR = "~/apm_profile"
-    
-    # 대기 시간 설정
+    USER_DATA_DIR = os.path.expanduser("~/apm_profile")
     WAIT_TIMEOUT = 20           
     CHROME_LAUNCH_WAIT = 4      
     MENU_CLICK_WAIT = 1         
@@ -72,7 +65,6 @@ class Config:
     PAGE_NAVIGATION_WAIT = 2
     MODAL_WAIT = 0.8 
 
-    # 공휴일 데이터
     HOLIDAYS_KR = {
         "2025-01-01": "신정", "2025-01-27": "설날 연휴", "2025-01-28": "설날", 
         "2025-01-29": "설날 연휴", "2025-01-30": "설날 대체공휴일",
@@ -84,64 +76,55 @@ class Config:
         "2025-10-08": "추석 대체공휴일", "2025-10-09": "한글날", "2025-12-25": "크리스마스"
     }
 
-# ============================================================
-# 1. 날짜 계산기
-# ============================================================
-
 class DateCalculator:
     @staticmethod
     def get_target_date(config: Config) -> str:
-        """가장 최근 영업일 계산"""
         cursor = datetime.now().date()
-        cursor -= timedelta(days=1) # 어제부터 탐색
+        cursor -= timedelta(days=1)
         while True:
             cursor_str = cursor.strftime("%Y-%m-%d")
-            if cursor.weekday() >= 5: # 주말
+            if cursor.weekday() >= 5:
                 cursor -= timedelta(days=1)
                 continue
-            if cursor_str in config.HOLIDAYS_KR: # 공휴일
+            if cursor_str in config.HOLIDAYS_KR:
                 print(f"🏖️ 공휴일 스킵: {cursor_str}")
                 cursor -= timedelta(days=1)
                 continue
             return cursor_str
-
-# ============================================================
-# 2. 브라우저 관리자 (헤드리스 + 위장 모드)
-# ============================================================
 
 class ChromeManager:
     @staticmethod
     def launch_chrome(config: Config):
         options = webdriver.ChromeOptions()
         
-        # [중요] 서버 환경용 헤드리스 설정
-        options.add_argument("--headless=new") 
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1920,1080")
-        
-        # [핵심] User-Agent 위장 (구글 로그인 차단 우회)
-        user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        options.add_argument(f"user-agent={user_agent}")
-        
-        # 봇 탐지 방지
+        if config.IS_SERVER:
+            options.add_argument("--headless=new") 
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--window-size=1920,1080")
+            user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            options.add_argument(f"user-agent={user_agent}")
+        else:
+            # 로컬: 화면 띄움 + 프로필 사용
+            options.add_argument(f"--user-data-dir={config.USER_DATA_DIR}")
+            options.add_argument("--window-size=1600,900")
+
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
 
-        print("🕵️‍♂️ 크롬 드라이버(Headless + 위장) 초기화 중...")
-        
         try:
             driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-            # navigator.webdriver 속성 숨기기
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             return driver
         except Exception as e:
             print(f"❌ 크롬 실행 실패: {e}")
+            if not config.IS_SERVER:
+                print("💡 팁: 크롬 창을 모두 끄고 다시 실행하세요!")
             sys.exit(1)
 
 # ============================================================
-# 3. 크롤러 (로그인 + 옵션선택 + 상세수집)
+# Crawler
 # ============================================================
 
 class BackOfficeCrawler:
@@ -155,7 +138,6 @@ class BackOfficeCrawler:
         except: self.driver.execute_script("arguments[0].click();", element)
 
     def handle_alert(self):
-        """경고창 처리"""
         try:
             alert = self.driver.switch_to.alert
             print(f"⚠️ 경고창 발견: {alert.text}")
@@ -164,22 +146,24 @@ class BackOfficeCrawler:
         except: pass
 
     def select_options(self):
-        """옵션(카테고리/코스/기수) 선택 로직 (디버깅 강화)"""
         print("👉 옵션 선택 중...")
         try:
-            # [디버깅] 현재 봇이 보고 있는 URL 찍어보기
-            print(f"👀 [DEBUG] 현재 페이지 주소: {self.driver.current_url}")
-            
-            # 만약 로그인 페이지라면 즉시 중단하고 로그 남김
-            if "login" in self.driver.current_url or "google.com" in self.driver.current_url:
-                print("🚨 [치명적 오류] 봇이 로그인 페이지에 갇혔습니다! 쿠키가 만료되었거나 차단되었습니다.")
-                return # 더 이상 진행 의미 없음
+            # [안전장치] 로그인 페이지 감지 시 대기 (로컬 전용)
+            if not self.config.IS_SERVER:
+                if "login" in self.driver.current_url or "google.com" in self.driver.current_url:
+                    print("\n" + "="*60)
+                    print("🚨 [알림] 로그인이 풀려있습니다!")
+                    print("   브라우저에서 직접 로그인 후, 관리자 페이지가 나오면")
+                    print("👉 여기 터미널에서 [Enter] 키를 누르세요.")
+                    print("="*60)
+                    input() # 무한 대기
+                    print("✅ 확인 완료! 진행합니다.")
 
             # 1. 카테고리
             cat_xpath = f"//*[contains(text(), '{self.config.CATEGORY}')]"
             cat_elem = self.wait.until(EC.element_to_be_clickable((By.XPATH, cat_xpath)))
             self.force_click(cat_elem)
-            time.sleep(self.config.MENU_CLICK_WAIT + 1) # 서버 렉 고려해서 1초 추가
+            time.sleep(self.config.MENU_CLICK_WAIT)
             
             # 2. 코스
             dropdowns = self.driver.find_elements(By.CSS_SELECTOR, ".ant-select-selector")
@@ -189,7 +173,7 @@ class BackOfficeCrawler:
                 cond = " and ".join([f"contains(., '{k}')" for k in self.config.COURSE_KEYWORDS])
                 opt = self.wait.until(EC.element_to_be_clickable((By.XPATH, f"//div[contains(@class, 'ant-select-item-option') and {cond}]")))
                 self.force_click(opt)
-                time.sleep(self.config.MENU_CLICK_WAIT + 1)
+                time.sleep(self.config.MENU_CLICK_WAIT)
             
             # 3. 기수
             dropdowns = self.driver.find_elements(By.CSS_SELECTOR, ".ant-select-selector")
@@ -201,34 +185,37 @@ class BackOfficeCrawler:
                     if opt.is_displayed():
                         self.force_click(opt)
                         break
-                time.sleep(self.config.MENU_CLICK_WAIT + 1)
+                time.sleep(self.config.MENU_CLICK_WAIT)
             
             print("✅ 옵션 선택 완료")
         except Exception as e:
             print(f"⚠️ 옵션 선택 실패: {e}")
-            # 혹시 화면에 뭐가 떠있는지 HTML 일부 출력 (디버깅용)
-            print(f"👀 [DEBUG] 화면 소스(일부): {self.driver.page_source[:200]}")
 
     def navigate_and_search(self):
         print("\n🔗 백오피스 진입...")
         self.driver.get(self.config.BACKOFFICE_URL)
         
-        # [쿠키 주입]
-        cookies_json = os.environ.get("BACKOFFICE_COOKIES")
-        if cookies_json:
-            print("🍪 쿠키 주입 시도...")
-            try:
-                cookies = json.loads(cookies_json)
-                for cookie in cookies:
-                    if 'expiry' in cookie: del cookie['expiry']
-                    if 'sameSite' in cookie: del cookie['sameSite']
-                    try: self.driver.add_cookie(cookie)
-                    except: pass
-                self.driver.refresh()
-                time.sleep(3)
-                self.handle_alert()
-            except Exception as e: print(f"⚠️ 쿠키 에러: {e}")
-        
+        # [서버용 쿠키 주입]
+        if self.config.IS_SERVER:
+            cookies_json = os.environ.get("BACKOFFICE_COOKIES")
+            if cookies_json:
+                print("🍪 [서버] 쿠키 주입 시도...")
+                try:
+                    cookies = json.loads(cookies_json)
+                    for cookie in cookies:
+                        if 'expiry' in cookie: del cookie['expiry']
+                        if 'sameSite' in cookie: del cookie['sameSite']
+                        if 'domain' in cookie: del cookie['domain']
+                        try: self.driver.add_cookie(cookie)
+                        except: pass
+                    self.driver.refresh()
+                    time.sleep(5)
+                    self.handle_alert()
+                except Exception as e: print(f"⚠️ 쿠키 에러: {e}")
+        else:
+            print("ℹ️ [로컬] 기존 로그인 세션 확인 중...")
+            time.sleep(3)
+
         # [메뉴 이동]
         try:
             time.sleep(2)
@@ -243,7 +230,6 @@ class BackOfficeCrawler:
             time.sleep(2)
         except: pass
         
-        # [옵션 선택 및 조회]
         self.select_options()
         
         try:
@@ -271,7 +257,6 @@ class BackOfficeCrawler:
             row_count = len(rows)
             for i in range(row_count):
                 try:
-                    # DOM 리프레시 대응
                     current_row = self.driver.find_elements(By.CSS_SELECTOR, "tr.ant-table-row")[i]
                     name = current_row.find_elements(By.TAG_NAME, "td")[0].text.strip()
                     print(f"   🔍 ({i+1}/{row_count}) {name}님...", end="\r")
@@ -341,7 +326,7 @@ def extract_til_data(manual_date: str = None) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ============================================================
-# 4. 구글 시트 업로더
+# Uploader
 # ============================================================
 
 JSON_FILE = "qaqc-pipeline.json" 
@@ -393,17 +378,11 @@ def upload_til_data(df: pd.DataFrame):
         manager.save_data(df)
     except Exception as e: print(f"❌ 업로드 오류: {e}")
 
-# ============================================================
-# 5. 메인 실행부 (반드시 존재해야 함!)
-# ============================================================
-
 if __name__ == "__main__":
     print("🔥 [START] 봇 가동 시작")
     
-    # 1. 수집
     df_result = extract_til_data(manual_date=TARGET_DATE_OVERRIDE)
     
-    # 2. 업로드
     if not df_result.empty:
         missed = len(df_result[df_result['제출여부'] == 0])
         print(f"📊 결과: 전체 {len(df_result)} / 미제출 {missed}")
