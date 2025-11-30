@@ -1,5 +1,5 @@
 # ============================================================
-# [DASHBOARD] QA/QC 트랙 TIL 관리 대시보드
+# [DASHBOARD] QA/QC 트랙 통합 관제 시스템 (TIL + 출석)
 # ============================================================
 
 import streamlit as st
@@ -13,15 +13,15 @@ from dotenv import load_dotenv
 from datetime import datetime
 
 # 1. 환경 설정 및 페이지 세팅
-load_dotenv() # 로컬에서 .env 파일 읽기
+load_dotenv()
 st.set_page_config(
-    page_title="QA 4기 TIL 관제탑",
-    page_icon="🚁",
+    page_title="QA 4기 통합 관제탑",
+    page_icon="🏢",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 스타일링 (CSS 커스텀)
+# 스타일링 (CSS)
 st.markdown("""
     <style>
         .metric-card {
@@ -37,138 +37,178 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 2. 데이터 로드 (캐싱으로 속도 10배 향상)
-@st.cache_data(ttl=60)  # 60초마다 데이터 갱신 (서버 부하 감소)
-def load_data():
+# 2. 데이터 로드 함수 (두 개의 탭을 각각 로드)
+@st.cache_data(ttl=60)
+def load_all_data():
     try:
-        # 인증 파일 및 URL 로드
         json_file = "qaqc-pipeline.json"
         sheet_url = os.environ.get("TIL_SHEET_URL")
         
         if not sheet_url:
-            st.error("❌ .env 파일에 'TIL_SHEET_URL'이 설정되지 않았습니다.")
-            return pd.DataFrame()
+            return None, None
 
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_name(json_file, scope)
         client = gspread.authorize(creds)
+        spreadsheet = client.open_by_url(sheet_url)
         
-        sheet = client.open_by_url(sheet_url).sheet1
-        data = sheet.get_all_records()
-        return pd.DataFrame(data)
+        # TIL 데이터
+        try:
+            til_sheet = spreadsheet.sheet1 # 혹은 spreadsheet.worksheet("raw_til_submissions")
+            til_data = til_sheet.get_all_records()
+            df_til = pd.DataFrame(til_data)
+        except:
+            df_til = pd.DataFrame()
+
+        # 출석 데이터
+        try:
+            att_sheet = spreadsheet.worksheet("raw_attendance_logs")
+            att_data = att_sheet.get_all_records()
+            df_att = pd.DataFrame(att_data)
+        except:
+            df_att = pd.DataFrame()
+            
+        return df_til, df_att
+
     except Exception as e:
         st.error(f"❌ 데이터 로드 실패: {e}")
-        st.error("💡 팁: 'qaqc-pipeline.json' 파일이 유효한지 확인해주세요.")
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
 def main():
-    # --- 데이터 로딩 및 검증 ---
-    df = load_data()
-    if df.empty:
-        st.warning("⚠️ 아직 수집된 데이터가 없습니다. 크롤러(daily_til_bot.py)를 먼저 실행해주세요.")
-        return
+    # --- 데이터 준비 ---
+    df_til, df_att = load_all_data()
+    
+    # 날짜 통합 (두 시트의 날짜를 합쳐서 선택지 생성)
+    all_dates = set()
+    if not df_til.empty and '날짜' in df_til.columns:
+        all_dates.update(df_til['날짜'].astype(str).unique())
+    if not df_att.empty and '날짜' in df_att.columns:
+        all_dates.update(df_att['날짜'].astype(str).unique())
+    
+    sorted_dates = sorted(list(all_dates), reverse=True)
 
-    # 날짜 필터 (최신순)
-    if '날짜' not in df.columns:
-        st.error("데이터에 '날짜' 컬럼이 없어 대시보드를 표시할 수 없습니다.")
-        return
-
-    # --- 사이드바 (컨트롤 패널) ---
+    # --- 사이드바 ---
     with st.sidebar:
-        st.title("🎛️ 조회 옵션")
+        st.title("🎛️ 컨트롤 패널")
         
-        df['날짜'] = df['날짜'].astype(str)
-        date_list = sorted(df['날짜'].unique().tolist(), reverse=True)
-        selected_date = st.selectbox("📅 날짜 선택", date_list, index=0)
+        if not sorted_dates:
+            st.warning("데이터가 없습니다.")
+            selected_date = datetime.now().strftime("%Y-%m-%d")
+        else:
+            selected_date = st.selectbox("📅 날짜 선택", sorted_dates, index=0)
             
         st.divider()
-        if st.button("🔄 데이터 새로고침", use_container_width=True):
+        if st.button("🔄 새로고침", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
         
-        st.caption(f"Last Check: {datetime.now().strftime('%H:%M:%S')}")
+        st.caption(f"Last Update: {datetime.now().strftime('%H:%M:%S')}")
 
-    # --- 데이터 전처리 (핵심) ---
-    today_df = df[df['날짜'] == selected_date].copy()
+    # --- 메인 헤더 ---
+    st.title(f"🏢 QA 4기 운영 현황 ({selected_date})")
     
-    # 제출(1)/미제출(0) 판별 로직 적용
-    submit_mask = today_df['제출여부'].astype(str).str.contains('1|제출|완료')
-    submit_df = today_df[submit_mask]
-    miss_df = today_df[~submit_mask]
-    
-    total_cnt = len(today_df)
-    submit_cnt = len(submit_df)
-    miss_cnt = len(miss_df)
-    submit_rate = round((submit_cnt / total_cnt) * 100, 1) if total_cnt > 0 else 0
+    # 탭 분리
+    tab1, tab2 = st.tabs(["📝 TIL 제출 현황", "⏰ 출석 관리 현황"])
 
-    # --- 메인 화면 ---
-    st.title(f"🚁 QA 4기 TIL 현황 ({selected_date})")
-    st.markdown("---")
+    # =================================================================
+    # [TAB 1] TIL 대시보드
+    # =================================================================
+    with tab1:
+        if df_til.empty:
+            st.warning("TIL 데이터가 없습니다.")
+        else:
+            # 오늘 데이터 필터링
+            today_til = df_til[df_til['날짜'] == selected_date].copy()
+            
+            if not today_til.empty:
+                submit_mask = today_til['제출여부'].astype(str).str.contains('1|제출|완료')
+                submit_cnt = len(today_til[submit_mask])
+                miss_cnt = len(today_til) - submit_cnt
+                rate = round((submit_cnt / len(today_til)) * 100, 1)
 
-    # [섹션 1] KPI 카드
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("📅 기준일", selected_date)
-    col2.metric("👥 총원", f"{total_cnt}명")
-    col3.metric("✅ 제출", f"{submit_cnt}명", f"{submit_rate}%")
-    col4.metric("🚨 미제출", f"{miss_cnt}명", delta=f"-{miss_cnt}명", delta_color="inverse")
-    
-    # [섹션 2] 미제출자 경보 시스템
-    if miss_cnt > 0:
-        st.error(f"📢 **오늘의 미제출자 ({miss_cnt}명)** 집중 관리 필요!")
-        
-        cols = st.columns(5)
-        for idx, row in enumerate(miss_df.itertuples()):
-            with cols[idx % 5]:
-                st.warning(f"**{row.이름}**")
-    else:
-        st.success("🎉 **전원 제출 완료!** 완벽합니다.")
+                # KPI
+                c1, c2, c3 = st.columns(3)
+                c1.metric("총원", f"{len(today_til)}명")
+                c2.metric("제출", f"{submit_cnt}명", f"{rate}%")
+                c3.metric("미제출", f"{miss_cnt}명", delta=f"-{miss_cnt}", delta_color="inverse")
 
-    st.markdown("---")
+                # 미제출자 명단
+                if miss_cnt > 0:
+                    miss_names = today_til[~submit_mask]['이름'].tolist()
+                    st.error(f"🚨 **미제출자:** {', '.join(miss_names)}")
+                else:
+                    st.success("🎉 전원 제출 완료!")
+                
+                st.divider()
+                
+                # 차트 & 테이블
+                col_l, col_r = st.columns([1, 2])
+                with col_l:
+                    fig = px.pie(names=['제출', '미제출'], values=[submit_cnt, miss_cnt], 
+                                 color_discrete_sequence=['#00CC96', '#EF553B'], hole=0.4)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col_r:
+                    def highlight_til(s):
+                        return ['background-color: #ffcdd2' if '0' in str(v) or '미제출' in str(v) else '' for v in s]
+                    st.dataframe(today_til[['이름', '제출여부', '날짜']].style.apply(highlight_til, subset=['제출여부']), use_container_width=True)
+            else:
+                st.info(f"{selected_date}일자 TIL 데이터가 없습니다.")
 
-    # [섹션 3] 시각화 (차트)
-    c1, c2 = st.columns([2, 1])
+    # =================================================================
+    # [TAB 2] 출석 대시보드
+    # =================================================================
+    with tab2:
+        if df_att.empty:
+            st.warning("출석 데이터가 없습니다.")
+        else:
+            # 오늘 데이터 필터링
+            today_att = df_att[df_att['날짜'] == selected_date].copy()
+            
+            if not today_att.empty:
+                # 상태별 카운트 (점수 기반: 1=출석, 0.5=지각/조퇴, 0=결석)
+                # 문자열로 들어올 수도 있으니 형변환 안전장치
+                today_att['상태'] = pd.to_numeric(today_att['상태'], errors='coerce').fillna(0)
+                
+                present_cnt = len(today_att[today_att['상태'] == 1])
+                issue_cnt = len(today_att[today_att['상태'] == 0.5]) # 지각/조퇴
+                absent_cnt = len(today_att[today_att['상태'] == 0])
+                
+                # KPI
+                ac1, ac2, ac3, ac4 = st.columns(4)
+                ac1.metric("총원", f"{len(today_att)}명")
+                ac2.metric("✅ 정상 출석", f"{present_cnt}명")
+                ac3.metric("⚠️ 지각/조퇴", f"{issue_cnt}명", delta_color="off")
+                ac4.metric("🚨 결석", f"{absent_cnt}명", delta_color="inverse")
+                
+                # 이슈 인원 명단 (지각/조퇴/결석)
+                issues = today_att[today_att['상태'] < 1]
+                if not issues.empty:
+                    st.warning(f"📢 **관리 필요 인원 ({len(issues)}명)**")
+                    st.dataframe(issues[['이름', '입실시간', '퇴실시간', '상태']], use_container_width=True)
+                else:
+                    st.success("🎉 전원 정상 출석!")
+                
+                st.divider()
+                
+                # 상세 테이블
+                st.subheader("📋 상세 출결 로그")
+                
+                # 색상 하이라이팅 함수
+                def highlight_att(row):
+                    val = row['상태']
+                    if val == 0: return ['background-color: #ffcdd2'] * len(row) # 결석(빨강)
+                    elif val == 0.5: return ['background-color: #fff9c4'] * len(row) # 지각/조퇴(노랑)
+                    return [''] * len(row)
 
-    with c1:
-        st.subheader("📉 주간 제출율 추세")
-        
-        daily_grp = df.groupby('날짜').apply(
-            lambda x: len(x[x['제출여부'].astype(str).str.contains('1|제출|완료')]) / len(x) * 100
-        ).reset_index(name='제출율')
-        
-        daily_grp = daily_grp.sort_values('날짜').tail(7)
-
-        fig_line = px.line(daily_grp, x='날짜', y='제출율', markers=True, text='제출율')
-        fig_line.update_traces(line_color='#FF4B4B', line_width=3, texttemplate='%{text:.1f}%', textposition='top center')
-        fig_line.update_layout(yaxis_range=[0, 110])
-        st.plotly_chart(fig_line, use_container_width=True)
-
-    with c2:
-        st.subheader("🍰 금일 비중")
-        
-        fig_pie = go.Figure(data=[go.Pie(
-            labels=['제출', '미제출'], 
-            values=[submit_cnt, miss_cnt], 
-            hole=.4,
-            marker=dict(colors=['#00CC96', '#EF553B'])
-        )])
-        fig_pie.update_layout(showlegend=True, margin=dict(t=0, b=0, l=0, r=0))
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    # [섹션 4] 전체 명단 테이블
-    with st.expander("📋 전체 수강생 상세 명단 보기 (클릭)"):
-        # 미제출자 행 강조 스타일
-        def highlight_row(row):
-            val = str(row['제출여부'])
-            if '0' in val or '미제출' in val:
-                return ['background-color: #ffebee'] * len(row)
-            return [''] * len(row)
-
-        st.dataframe(
-            today_df.style.apply(highlight_row, axis=1),
-            use_container_width=True,
-            height=500,
-            hide_index=True
-        )
+                st.dataframe(
+                    today_att[['이름', '입실시간', '퇴실시간', '상태']].style.apply(highlight_att, axis=1),
+                    use_container_width=True,
+                    height=500
+                )
+                
+            else:
+                st.info(f"{selected_date}일자 출석 데이터가 없습니다.")
 
 if __name__ == "__main__":
     main()
