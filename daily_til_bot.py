@@ -164,14 +164,22 @@ class BackOfficeCrawler:
         except: pass
 
     def select_options(self):
-        """옵션(카테고리/코스/기수) 선택 로직"""
+        """옵션(카테고리/코스/기수) 선택 로직 (디버깅 강화)"""
         print("👉 옵션 선택 중...")
         try:
+            # [디버깅] 현재 봇이 보고 있는 URL 찍어보기
+            print(f"👀 [DEBUG] 현재 페이지 주소: {self.driver.current_url}")
+            
+            # 만약 로그인 페이지라면 즉시 중단하고 로그 남김
+            if "login" in self.driver.current_url or "google.com" in self.driver.current_url:
+                print("🚨 [치명적 오류] 봇이 로그인 페이지에 갇혔습니다! 쿠키가 만료되었거나 차단되었습니다.")
+                return # 더 이상 진행 의미 없음
+
             # 1. 카테고리
             cat_xpath = f"//*[contains(text(), '{self.config.CATEGORY}')]"
             cat_elem = self.wait.until(EC.element_to_be_clickable((By.XPATH, cat_xpath)))
             self.force_click(cat_elem)
-            time.sleep(self.config.MENU_CLICK_WAIT)
+            time.sleep(self.config.MENU_CLICK_WAIT + 1) # 서버 렉 고려해서 1초 추가
             
             # 2. 코스
             dropdowns = self.driver.find_elements(By.CSS_SELECTOR, ".ant-select-selector")
@@ -181,7 +189,7 @@ class BackOfficeCrawler:
                 cond = " and ".join([f"contains(., '{k}')" for k in self.config.COURSE_KEYWORDS])
                 opt = self.wait.until(EC.element_to_be_clickable((By.XPATH, f"//div[contains(@class, 'ant-select-item-option') and {cond}]")))
                 self.force_click(opt)
-                time.sleep(self.config.MENU_CLICK_WAIT)
+                time.sleep(self.config.MENU_CLICK_WAIT + 1)
             
             # 3. 기수
             dropdowns = self.driver.find_elements(By.CSS_SELECTOR, ".ant-select-selector")
@@ -193,11 +201,13 @@ class BackOfficeCrawler:
                     if opt.is_displayed():
                         self.force_click(opt)
                         break
-                time.sleep(self.config.MENU_CLICK_WAIT)
+                time.sleep(self.config.MENU_CLICK_WAIT + 1)
             
             print("✅ 옵션 선택 완료")
         except Exception as e:
-            print(f"⚠️ 옵션 선택 중 이슈 (진행 시도): {e}")
+            print(f"⚠️ 옵션 선택 실패: {e}")
+            # 혹시 화면에 뭐가 떠있는지 HTML 일부 출력 (디버깅용)
+            print(f"👀 [DEBUG] 화면 소스(일부): {self.driver.page_source[:200]}")
 
     def navigate_and_search(self):
         print("\n🔗 백오피스 진입...")
