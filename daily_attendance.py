@@ -73,16 +73,33 @@ class Config:
 class DateCalculator:
     @staticmethod
     def get_target_date(config: Config) -> str:
-        today = datetime.now().date()
+        """
+        실행 시점(한국 시간 KST)을 기준으로 수집 여부 판단
+        """
+        # 1. [핵심 수정] UTC 시간에 9시간을 더해 한국 시간(KST)을 만듭니다.
+        kst_now = datetime.utcnow() + timedelta(hours=9)
+        today = kst_now.date()
         today_str = today.strftime("%Y-%m-%d")
         
+        # 디버깅용 로그 (서버 시간이 맞는지 확인)
+        print(f"🕒 [Timezone] 한국 시간(KST): {kst_now.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # ---------------------------------------------------------
+        # 2. 오늘이 주말/공휴일인지 체크
+        # ---------------------------------------------------------
+        
+        # 주말 체크 (토=5, 일=6)
+        # 월요일(0) 00시 50분에 실행되면 -> 통과!
         if today.weekday() >= 5:
             print(f"🛌 오늘은 주말({today_str})입니다. 봇이 쉽니다.")
             return None
+            
+        # 공휴일 체크
         if today_str in config.HOLIDAYS_KR:
             print(f"🏖️ 오늘은 공휴일({config.HOLIDAYS_KR[today_str]})입니다. 봇이 쉽니다.")
             return None
             
+        # 3. 평일이면 -> '오늘' 날짜를 타겟으로 반환
         return today_str
 
 # ============================================================
