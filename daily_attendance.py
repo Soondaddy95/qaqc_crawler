@@ -1,8 +1,8 @@
 # ============================================================
-# [Attendance Bot] 출석/지각/조퇴 자동 집계 (Smart Attach Ver.)
+# [Attendance Bot] 출석/지각/조퇴 자동 집계 (Debug Ver.)
 # ============================================================
 
-# 👇 [수집 날짜 설정] None = 자동(오늘), "2025-11-30" = 특정 날짜
+# 👇 [수집 날짜 설정] None = 자동(오늘/어제), "2025-12-01" = 특정 날짜
 TARGET_DATE_OVERRIDE = None 
 
 import time
@@ -45,16 +45,17 @@ class Config:
     LEAVE_CUTOFF = "21:00"
     
     USER_DATA_DIR = os.path.expanduser("~/apm_profile")
-    CHROME_DEBUG_PORT = 9222 # 포트 고정
+    CHROME_DEBUG_PORT = 9222 
     
     if sys.platform == "darwin":
         CHROME_APP_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     else:
         CHROME_APP_PATH = "/usr/bin/google-chrome"
 
-    WAIT_TIMEOUT = 20
-    DATA_COLLECTION_WAIT = 0.5
-    MODAL_WAIT = 0.8
+    WAIT_TIMEOUT = 30 # 대기 시간 늘림
+    CHROME_LAUNCH_WAIT = 4
+    DATA_COLLECTION_WAIT = 1.0
+    MODAL_WAIT = 1.5
 
     HOLIDAYS_KR = {
         "2025-01-01": "신정", "2025-01-27": "설날 연휴", "2025-01-28": "설날", 
@@ -68,42 +69,29 @@ class Config:
     }
 
 # ============================================================
-# 2. DateCalculator
+# 2. DateCalculator (KST 적용)
 # ============================================================
 class DateCalculator:
     @staticmethod
     def get_target_date(config: Config) -> str:
-        """
-        실행 시점(한국 시간 KST)을 기준으로 수집 여부 판단
-        """
-        # 1. [핵심 수정] UTC 시간에 9시간을 더해 한국 시간(KST)을 만듭니다.
+        # 깃허브 서버(UTC)에서도 한국 시간(KST) 기준으로 날짜 계산
         kst_now = datetime.utcnow() + timedelta(hours=9)
         today = kst_now.date()
         today_str = today.strftime("%Y-%m-%d")
         
-        # 디버깅용 로그 (서버 시간이 맞는지 확인)
         print(f"🕒 [Timezone] 한국 시간(KST): {kst_now.strftime('%Y-%m-%d %H:%M:%S')}")
         
-        # ---------------------------------------------------------
-        # 2. 오늘이 주말/공휴일인지 체크
-        # ---------------------------------------------------------
-        
-        # 주말 체크 (토=5, 일=6)
-        # 월요일(0) 00시 50분에 실행되면 -> 통과!
         if today.weekday() >= 5:
             print(f"🛌 오늘은 주말({today_str})입니다. 봇이 쉽니다.")
             return None
-            
-        # 공휴일 체크
         if today_str in config.HOLIDAYS_KR:
             print(f"🏖️ 오늘은 공휴일({config.HOLIDAYS_KR[today_str]})입니다. 봇이 쉽니다.")
             return None
             
-        # 3. 평일이면 -> '오늘' 날짜를 타겟으로 반환
         return today_str
 
 # ============================================================
-# 3. ChromeManager (스마트 연결 모드)
+# 3. ChromeManager
 # ============================================================
 class ChromeManager:
     @staticmethod
@@ -116,14 +104,14 @@ class ChromeManager:
     def launch_chrome(config: Config):
         options = webdriver.ChromeOptions()
         
-        # [서버] Headless
         if config.IS_SERVER:
             print("☁️ [서버 모드] Headless 실행")
             options.add_argument("--headless=new") 
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--window-size=1920,1080")
-            user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            # 맥북 크롬인 척 위장 (가장 최신 버전)
+            user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             options.add_argument(f"user-agent={user_agent}")
             
             try:
@@ -134,13 +122,10 @@ class ChromeManager:
                 print(f"❌ 크롬 실행 실패: {e}")
                 sys.exit(1)
 
-        # [로컬] 스마트 연결 (포트 9222)
         else:
             print("🍎 [로컬 모드] 스마트 연결 시도...")
-            
-            # 포트가 닫혀있으면 새로 실행
             if not ChromeManager.is_port_open(config.CHROME_DEBUG_PORT):
-                print(f"   💨 크롬이 꺼져있습니다. 디버깅 모드로 실행합니다...")
+                print(f"   💨 크롬 실행...")
                 cmd = [
                     config.CHROME_APP_PATH,
                     f"--remote-debugging-port={config.CHROME_DEBUG_PORT}",
@@ -149,17 +134,14 @@ class ChromeManager:
                 subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(3)
             else:
-                print(f"   ⚡ 이미 켜진 크롬에 연결합니다.")
+                print(f"   ⚡ 기존 크롬 연결")
 
-            # 디버깅 포트로 연결
             options.add_experimental_option("debuggerAddress", f"127.0.0.1:{config.CHROME_DEBUG_PORT}")
-            
             try:
                 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
                 return driver
             except Exception as e:
                 print(f"❌ 연결 실패: {e}")
-                print("💡 팁: 터미널에서 'pkill Chrome' 입력 후 다시 시도해보세요.")
                 sys.exit(1)
 
 # ============================================================
@@ -178,9 +160,7 @@ class AttendanceCrawler:
         print("\n🔗 백오피스 진입 중...")
         self.driver.get(self.config.BACKOFFICE_URL)
         
-        # ---------------------------------------------------------
-        # 🍪 [추가된 부분] 쿠키 주입 로직 (서버 환경 필수)
-        # ---------------------------------------------------------
+        # [서버] 쿠키 주입 로직
         if self.config.IS_SERVER:
             cookies_json = os.environ.get("BACKOFFICE_COOKIES")
             if cookies_json:
@@ -190,28 +170,28 @@ class AttendanceCrawler:
                     for cookie in cookies:
                         if 'expiry' in cookie: del cookie['expiry']
                         if 'sameSite' in cookie: del cookie['sameSite']
-                        if 'domain' in cookie: del cookie['domain'] # 핵심!
+                        if 'domain' in cookie: del cookie['domain']
                         try: self.driver.add_cookie(cookie)
                         except: pass
                     
-                    print("🔄 쿠키 적용 후 새로고침...")
+                    print("🔄 쿠키 적용 후 새로고침... (10초 대기)")
                     self.driver.refresh()
-                    time.sleep(5) # 로그인 적용 대기
+                    time.sleep(10) # 서버 반영 대기 시간 대폭 증가
                     
-                    # 경고창 있으면 닫기
-                    try:
-                        alert = self.driver.switch_to.alert
-                        alert.accept()
-                    except: pass
+                    # [중요] 현재 URL 체크 (로그인 튕김 확인)
+                    current_url = self.driver.current_url
+                    print(f"👀 [체크] 현재 페이지: {current_url}")
                     
+                    if "login" in current_url or "google.com" in current_url:
+                        print("🚨 [로그인 실패] 쿠키가 거부당했습니다. 로그인 페이지로 리다이렉트됨.")
+                        # 실패해도 일단 진행해보고, 아래에서 에러 잡히게 함
+                    else:
+                        print("✅ 로그인 유지 성공 (관리자 페이지 진입)")
+
                 except Exception as e: print(f"⚠️ 쿠키 에러: {e}")
         else:
-            # 로컬
             time.sleep(3)
 
-        # ---------------------------------------------------------
-        # 메뉴 이동 로직 (기존과 동일)
-        # ---------------------------------------------------------
         print("👉 메뉴 이동 시작...")
         try:
             # 1. '내배캠 운영' 펼치기
@@ -231,14 +211,13 @@ class AttendanceCrawler:
             dashboard_menu = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), '본캠프 출결 대시보드')]")))
             self.force_click(dashboard_menu)
             
-            time.sleep(3) # 페이지 로딩 대기
+            time.sleep(5) # 페이지 로딩 대기
             print("✅ 출결 대시보드 진입 성공")
 
         except Exception as e:
             print(f"❌ 메뉴 이동 실패: {e}")
-            # 로그인 실패 시 여기서 멈추도록 에러 던지기
-            if "로그인이 필요합니다" in str(e):
-                raise Exception("LOGIN_FAILED: 쿠키 만료됨.")
+            # 현재 화면 소스 일부 출력 (디버깅용)
+            # print(self.driver.page_source[:500])
 
     def select_options(self):
         print("👉 [출석부] 옵션 선택 시작...")
@@ -299,7 +278,8 @@ class AttendanceCrawler:
                 self.force_click(search_btn)
                 print("   ✅ 조회 버튼 클릭 완료")
             except: pass
-            time.sleep(3)
+            time.sleep(5) # 데이터 로딩 대기
+
         except Exception as e: print(f"❌ 옵션 선택 중 오류: {e}")
 
     def collect_data(self, target_date) -> list:
@@ -308,7 +288,7 @@ class AttendanceCrawler:
         
         print("   ⏳ 테이블 로딩 중...")
         try:
-            WebDriverWait(self.driver, 15).until(EC.presence_of_element_located((By.CLASS_NAME, "css-1xm32e0")))
+            WebDriverWait(self.driver, 20).until(EC.presence_of_element_located((By.CLASS_NAME, "css-1xm32e0")))
             time.sleep(2)
         except:
             print("   ⚠️ 데이터 로딩 실패 or 없음")
@@ -336,7 +316,6 @@ class AttendanceCrawler:
                         if out_time and out_time < self.config.LEAVE_CUTOFF:
                             status = 0.5 # 조퇴
                         elif not out_time:
-                             # 밤 늦게 돌릴 때 퇴실 없으면 미체크(0.5)
                              status = 0.5 
                     else:
                         status = 0.5 # 지각
@@ -345,8 +324,8 @@ class AttendanceCrawler:
                     print(f"   🔍 {name}: {in_time if in_time else '-'} ~ {out_time if out_time else '-'} -> 점수: {status}")
 
                 total_data.append({
-                    "이름": name,
                     "날짜": target_date,
+                    "이름": name,
                     "입실시간": in_time if in_time else "-",
                     "퇴실시간": out_time if out_time else "-",
                     "상태": status
@@ -422,7 +401,6 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"❌ 에러 발생: {e}")
             finally:
-                # driver.quit() 
                 pass
     else:
         print("😴 주말/공휴일입니다.")
