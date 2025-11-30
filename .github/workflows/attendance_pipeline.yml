@@ -1,0 +1,48 @@
+name: Attendance Data Pipeline
+
+on:
+  schedule:
+    # 1. [오전 점검] 평일(월~금) 09:11 KST (UTC 00:11)
+    - cron: '11 00 * * 1-5'
+    
+    # 2. [최종 마감] 평일(월~금) 22:00 KST (UTC 13:00)
+    # (퇴실 및 최종 상태 확정용)
+    - cron: '00 13 * * 1-5'
+
+  # 수동 실행 버튼 (테스트용)
+  workflow_dispatch:
+
+jobs:
+  run-attendance-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'  # 형님 로컬 버전과 동일하게
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@latest
+        with:
+          chrome-version: stable
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Create JSON key file
+        run: |
+          echo '${{ secrets.GOOGLE_JSON_KEY }}' > qaqc-pipeline.json
+
+      - name: Run Attendance Bot
+        env:
+          # 기존에 등록한 Secrets를 그대로 공유해서 씁니다! (효율 최고)
+          BACKOFFICE_URL: ${{ secrets.BACKOFFICE_URL }}
+          TIL_SHEET_URL: ${{ secrets.TIL_SHEET_URL }}
+          BACKOFFICE_COOKIES: ${{ secrets.BACKOFFICE_COOKIES }}
+        run: |
+          python daily_attendance.py
