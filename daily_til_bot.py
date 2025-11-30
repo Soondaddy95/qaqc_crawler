@@ -1,8 +1,10 @@
 # ============================================================
-# [FINAL COMPLETE v5] 안전벨트(로그인 대기) 탑재 버전
+# [FINAL COMPLETE v6] GitHub Actions & Local Hybrid TIL 자동화 봇
 # ============================================================
 
 # 👇 [수집 날짜 설정]
+# None으로 두면 시스템이 '가장 최근 영업일'을 자동 계산합니다.
+# 특정 날짜를 수집하려면 "2025-11-27" 처럼 문자열로 적으세요.
 TARGET_DATE_OVERRIDE = None 
 
 import subprocess
@@ -32,16 +34,23 @@ from selenium.common.exceptions import (
 )
 from selenium.webdriver.common.keys import Keys
 
+# .env 파일 로드 (로컬 실행용)
 load_dotenv() 
 
 # ============================================================
-# Config
+# Config 설정 클래스 (환경 분기)
 # ============================================================
 
 class Config:
+    """크롤링 설정 및 환경 구성"""
+    
+    # 1. 환경 감지: GitHub Actions 환경이면 True
     IS_SERVER = os.environ.get("GITHUB_ACTIONS") == "true"
+    
+    # 🔒 [보안] URL은 환경변수에서 가져옴
     BACKOFFICE_URL = os.environ.get("BACKOFFICE_URL")
     if not BACKOFFICE_URL:
+        # 로컬 편의를 위해 기본값 설정
         BACKOFFICE_URL = "https://h99backoffice.spartaclub.kr/"
 
     COURSE_NAME = "QA 4기"
@@ -50,12 +59,15 @@ class Config:
     CATEGORY = "QA/QC"
 
     CHROME_DEBUG_PORT = 9222
-    if sys.platform == "darwin":
+    
+    if sys.platform == "darwin":  # Mac Studio
         CHROME_APP_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    else:
+    else:  # Linux (GitHub Actions)
         CHROME_APP_PATH = "/usr/bin/google-chrome"
         
     USER_DATA_DIR = os.path.expanduser("~/apm_profile")
+    
+    # 대기 시간 설정
     WAIT_TIMEOUT = 20           
     CHROME_LAUNCH_WAIT = 4      
     MENU_CLICK_WAIT = 1         
@@ -76,55 +88,70 @@ class Config:
         "2025-10-08": "추석 대체공휴일", "2025-10-09": "한글날", "2025-12-25": "크리스마스"
     }
 
+# ============================================================
+# 1. 날짜 계산기
+# ============================================================
+
 class DateCalculator:
     @staticmethod
     def get_target_date(config: Config) -> str:
+        """가장 최근 영업일(평일) 계산"""
         cursor = datetime.now().date()
-        cursor -= timedelta(days=1)
+        cursor -= timedelta(days=1) # 어제부터 탐색
         while True:
             cursor_str = cursor.strftime("%Y-%m-%d")
-            if cursor.weekday() >= 5:
+            if cursor.weekday() >= 5: # 주말
                 cursor -= timedelta(days=1)
                 continue
-            if cursor_str in config.HOLIDAYS_KR:
+            if cursor_str in config.HOLIDAYS_KR: # 공휴일
                 print(f"🏖️ 공휴일 스킵: {cursor_str}")
                 cursor -= timedelta(days=1)
                 continue
             return cursor_str
+
+# ============================================================
+# 2. 브라우저 관리자
+# ============================================================
 
 class ChromeManager:
     @staticmethod
     def launch_chrome(config: Config):
         options = webdriver.ChromeOptions()
         
+        # [중요] 환경별 브라우저 설정
         if config.IS_SERVER:
+            # ☁️ [서버 모드] Headless + 위장
+            print("☁️ [서버 모드] 깃허브 액션 환경 감지 -> Headless 실행")
             options.add_argument("--headless=new") 
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--window-size=1920,1080")
+            
+            # User-Agent 위장
             user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             options.add_argument(f"user-agent={user_agent}")
         else:
-            # 로컬: 화면 띄움 + 프로필 사용
+            # 🍎 [로컬 모드] 화면 띄움 + 내 프로필 사용
+            print("🍎 [로컬 모드] 맥 스튜디오 환경 감지 -> 화면 띄움 + 프로필 사용")
             options.add_argument(f"--user-data-dir={config.USER_DATA_DIR}")
             options.add_argument("--window-size=1600,900")
-
+        
+        # 공통 설정
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
 
+        print("🕵️‍♂️ 크롬 드라이버 초기화 중...")
         try:
             driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             return driver
         except Exception as e:
             print(f"❌ 크롬 실행 실패: {e}")
-            if not config.IS_SERVER:
-                print("💡 팁: 크롬 창을 모두 끄고 다시 실행하세요!")
             sys.exit(1)
 
 # ============================================================
-# Crawler
+# 3. 크롤러 로직
 # ============================================================
 
 class BackOfficeCrawler:
@@ -138,6 +165,7 @@ class BackOfficeCrawler:
         except: self.driver.execute_script("arguments[0].click();", element)
 
     def handle_alert(self):
+        """경고창 처리"""
         try:
             alert = self.driver.switch_to.alert
             print(f"⚠️ 경고창 발견: {alert.text}")
@@ -146,19 +174,19 @@ class BackOfficeCrawler:
         except: pass
 
     def select_options(self):
+        """옵션(카테고리/코스/기수) 선택 로직"""
         print("👉 옵션 선택 중...")
-        try:
-            # [안전장치] 로그인 페이지 감지 시 대기 (로컬 전용)
-            if not self.config.IS_SERVER:
-                if "login" in self.driver.current_url or "google.com" in self.driver.current_url:
-                    print("\n" + "="*60)
-                    print("🚨 [알림] 로그인이 풀려있습니다!")
-                    print("   브라우저에서 직접 로그인 후, 관리자 페이지가 나오면")
-                    print("👉 여기 터미널에서 [Enter] 키를 누르세요.")
-                    print("="*60)
-                    input() # 무한 대기
-                    print("✅ 확인 완료! 진행합니다.")
+        
+        # 🚨 [중요] 로그인 체크 및 로컬 대기 기능 (로그인 실패 감지)
+        if not self.config.IS_SERVER:
+            if "login" in self.driver.current_url or "google.com" in self.driver.current_url:
+                print("\n" + "="*60)
+                print("🚨 [알림] 로그인이 풀려있습니다! 브라우저에서 직접 로그인 후 [Enter]를 누르세요.")
+                print("="*60)
+                input() 
+                print("✅ 확인 완료! 진행합니다.")
 
+        try:
             # 1. 카테고리
             cat_xpath = f"//*[contains(text(), '{self.config.CATEGORY}')]"
             cat_elem = self.wait.until(EC.element_to_be_clickable((By.XPATH, cat_xpath)))
@@ -189,7 +217,9 @@ class BackOfficeCrawler:
             
             print("✅ 옵션 선택 완료")
         except Exception as e:
+            # 로그인 실패 -> 옵션 선택 불가
             print(f"⚠️ 옵션 선택 실패: {e}")
+            raise Exception("OPTIONS_SELECTION_FAILED: 로그인 실패 또는 DOM 요소 누락.")
 
     def navigate_and_search(self):
         print("\n🔗 백오피스 진입...")
@@ -199,7 +229,7 @@ class BackOfficeCrawler:
         if self.config.IS_SERVER:
             cookies_json = os.environ.get("BACKOFFICE_COOKIES")
             if cookies_json:
-                print("🍪 [서버] 쿠키 주입 시도...")
+                print("🍪 쿠키 주입 시도...")
                 try:
                     cookies = json.loads(cookies_json)
                     for cookie in cookies:
@@ -208,12 +238,21 @@ class BackOfficeCrawler:
                         if 'domain' in cookie: del cookie['domain']
                         try: self.driver.add_cookie(cookie)
                         except: pass
+                    
                     self.driver.refresh()
-                    time.sleep(5)
+                    time.sleep(8) # 쿠키 적용 및 리디렉션 대기 시간 증가
                     self.handle_alert()
-                except Exception as e: print(f"⚠️ 쿠키 에러: {e}")
+                    
+                    # [최종 로그인 체크]
+                    if "login" in self.driver.current_url or "google.com" in self.driver.current_url:
+                        print(f"🚨 [치명적 실패] 쿠키 주입 후에도 로그인 페이지에 갇힘. (URL: {self.driver.current_url})")
+                        raise Exception("LOGIN_FAILED: 쿠키 만료 또는 IP 차단.")
+
+                except Exception as e: 
+                    print(f"⚠️ 쿠키 처리 중 오류: {e}")
+                    raise Exception("COOKIE_PROCESSING_ERROR: 쿠키 JSON 형식이 잘못되었거나 오류 발생.")
         else:
-            print("ℹ️ [로컬] 기존 로그인 세션 확인 중...")
+            print("ℹ️ [로컬] 기존 로그인 세션 사용 중... (3초 대기)")
             time.sleep(3)
 
         # [메뉴 이동]
@@ -230,6 +269,7 @@ class BackOfficeCrawler:
             time.sleep(2)
         except: pass
         
+        # [옵션 선택 및 조회]
         self.select_options()
         
         try:
@@ -326,7 +366,7 @@ def extract_til_data(manual_date: str = None) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ============================================================
-# Uploader
+# 4. 구글 시트 업로더
 # ============================================================
 
 JSON_FILE = "qaqc-pipeline.json" 
@@ -372,20 +412,27 @@ class GoogleSheetManager:
         print(f"✅ 저장 완료!")
 
 def upload_til_data(df: pd.DataFrame):
+    """업로드 실행 함수"""
     try:
         if df is None or df.empty: return
         manager = GoogleSheetManager()
         manager.save_data(df)
     except Exception as e: print(f"❌ 업로드 오류: {e}")
 
+# ============================================================
+# 5. 메인 실행부 (Main Entry)
+# ============================================================
+
 if __name__ == "__main__":
     print("🔥 [START] 봇 가동 시작")
     
+    # 1. 수집
     df_result = extract_til_data(manual_date=TARGET_DATE_OVERRIDE)
     
+    # 2. 업로드
     if not df_result.empty:
         missed = len(df_result[df_result['제출여부'] == 0])
-        print(f"📊 결과: 전체 {len(df_result)} / 미제출 {missed}")
+        print(f"📊 결과: 전체 {len(df_result)}명 / 제출: {len(df_result)-missed} / 미제출: {missed}")
         upload_til_data(df_result)
     else:
         print("⚠️ 수집된 데이터 없음")
